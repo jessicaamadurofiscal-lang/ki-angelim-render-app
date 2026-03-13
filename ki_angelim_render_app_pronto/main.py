@@ -1286,7 +1286,7 @@ class DashboardApp:
 
     def small_toggle(self, text: str, selected: bool, handler) -> ft.Control:
         return ft.TextButton(
-            text=text,
+            text,
             style=ft.ButtonStyle(
                 bgcolor=SOFT_BLUE if selected else "#F8FAFC",
                 color=PRIMARY_DARK if selected else "#334155",
