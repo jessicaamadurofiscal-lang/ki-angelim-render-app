@@ -114,6 +114,34 @@ class Bundle:
     multi: MultiSimplesInputs
 
 
+def to_number(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return default
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return default
+    text = text.replace("R$", "").replace("%", "").replace(" ", "")
+    if "," in text and "." in text:
+        text = text.replace(".", "").replace(",", ".")
+    elif "," in text:
+        text = text.replace(",", ".")
+    try:
+        return float(text)
+    except Exception:
+        return default
+
+
+def series_sum_numeric(df: pd.DataFrame, column: str) -> float:
+    if column not in df.columns:
+        return 0.0
+    return float(df[column].map(lambda v: to_number(v, 0.0)).sum())
+
+
 def br_money(value: Any) -> str:
     try:
         number = float(value or 0)
@@ -443,21 +471,21 @@ class DashboardApp:
     def apply_defaults_from_files(self):
         rev = self.bundle.modelo.get("revenda_credito", pd.DataFrame())
         if not rev.empty:
-            total_rev = rev["VALOR_ENTRADA"].sum()
-            total_icms = rev["ICMS_OBSERVADO"].sum()
+            total_rev = series_sum_numeric(rev, "VALOR_ENTRADA")
+            total_icms = series_sum_numeric(rev, "ICMS_OBSERVADO")
             if total_rev:
                 self.matrix.credito_icms_pct = total_icms / total_rev
         icms_df = self.bundle.modelo.get("icms_matriz", pd.DataFrame())
         if not icms_df.empty and "Linha" in icms_df.columns:
-            mapping = {str(r["Linha"]).strip(): r.get("Valor", None) for _, r in icms_df.iterrows()}
-            self.matrix.faturamento = float(mapping.get("Faturamento de saída", self.matrix.faturamento) or self.matrix.faturamento)
-            self.matrix.credito_icms_estoque_total = float(mapping.get("Crédito total ICMS estoque", self.matrix.credito_icms_estoque_total) or self.matrix.credito_icms_estoque_total)
+            mapping = {str(r["Linha"]).strip(): to_number(r.get("Valor", None), 0.0) for _, r in icms_df.iterrows()}
+            self.matrix.faturamento = to_number(mapping.get("Faturamento de saída", self.matrix.faturamento), self.matrix.faturamento)
+            self.matrix.credito_icms_estoque_total = to_number(mapping.get("Crédito total ICMS estoque", self.matrix.credito_icms_estoque_total), self.matrix.credito_icms_estoque_total)
         filial_df = self.bundle.modelo.get("filial", pd.DataFrame())
         if not filial_df.empty and "Linha" in filial_df.columns:
             try:
                 row = filial_df[filial_df["Linha"].astype(str).str.contains("Faturamento de saída", na=False)].iloc[0]
                 if "300 mil" in row:
-                    self.filial.faturamento = float(row["300 mil"] or self.filial.faturamento)
+                    self.filial.faturamento = to_number(row["300 mil"], self.filial.faturamento)
             except Exception:
                 pass
         prem = self.bundle.modelo.get("premissas", pd.DataFrame())
@@ -466,10 +494,7 @@ class DashboardApp:
                 label = str(row.iloc[0] or "")
                 val = row.iloc[1]
                 if label.startswith("Filial | despesa média mensal"):
-                    try:
-                        self.filial.despesa_informativa = float(val)
-                    except Exception:
-                        pass
+                    self.filial.despesa_informativa = to_number(val, self.filial.despesa_informativa)
 
     def render(self):
         self.page.controls.clear()
