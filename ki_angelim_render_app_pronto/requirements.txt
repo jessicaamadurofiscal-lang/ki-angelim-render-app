@@ -1,0 +1,6 @@
+flet[all]
+flet-charts
+pandas
+openpyxl
+pypdf
+uvicorn[standard]
