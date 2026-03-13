@@ -114,6 +114,34 @@ class Bundle:
     multi: MultiSimplesInputs
 
 
+def to_number(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return default
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none"}:
+        return default
+    text = text.replace("R$", "").replace("%", "").replace(" ", "")
+    if "," in text and "." in text:
+        text = text.replace(".", "").replace(",", ".")
+    elif "," in text:
+        text = text.replace(",", ".")
+    try:
+        return float(text)
+    except Exception:
+        return default
+
+
+def series_sum_numeric(df: pd.DataFrame, column: str) -> float:
+    if column not in df.columns:
+        return 0.0
+    return float(df[column].map(lambda v: to_number(v, 0.0)).sum())
+
+
 def br_money(value: Any) -> str:
     try:
         number = float(value or 0)
@@ -323,31 +351,55 @@ def calc_filial(inputs: FilialInputs) -> dict[str, float]:
 
 
 def calc_federal(matrix: MatrixInputs, filial: FilialInputs) -> dict[str, float]:
-    total_revenue = matrix.faturamento + filial.faturamento
-    credito_pis = 1_264.8785066666665
-    credito_cofins = 5_837.9008
-    pis_bruto = total_revenue * filial.pis
-    cofins_bruto = total_revenue * filial.cofins
-    pis_liquido = max(pis_bruto - credito_pis, 0)
-    cofins_liquido = max(cofins_bruto - credito_cofins, 0)
-    ir = ir_presumido(total_revenue, filial.ir_base_pct, filial.ir_pct, filial.adicional_ir_pct, filial.limite_adicional)
-    csll = total_revenue * filial.csll_base_pct * filial.csll_pct
+    receita_matriz = matrix.faturamento
+    receita_unificada = matrix.faturamento + filial.faturamento
+
+    # Matriz, informativo na aba da matriz
+    pis_matriz = receita_matriz * filial.pis
+    cofins_matriz = receita_matriz * filial.cofins
+    ir_base_matriz = receita_matriz * filial.ir_base_pct
+    adicional_ir_matriz = max(ir_base_matriz - filial.limite_adicional, 0) * filial.adicional_ir_pct
+    ir_matriz = (ir_base_matriz * filial.ir_pct) + adicional_ir_matriz
+    csll_matriz = receita_matriz * filial.csll_base_pct * filial.csll_pct
+    federal_matriz = pis_matriz + cofins_matriz + ir_matriz + csll_matriz
+
+    # Consolidado, executivo
+    pis_bruto = receita_unificada * filial.pis
+    cofins_bruto = receita_unificada * filial.cofins
+    pis_liquido = pis_bruto
+    cofins_liquido = cofins_bruto
+
+    ir_base = receita_unificada * filial.ir_base_pct
+    adicional_ir = max(ir_base - filial.limite_adicional, 0) * filial.adicional_ir_pct
+    ir = (ir_base * filial.ir_pct) + adicional_ir
+    csll = receita_unificada * filial.csll_base_pct * filial.csll_pct
     ipi = filial.faturamento * filial.ipi
+
     total = pis_liquido + cofins_liquido + ir + csll + ipi
+
     return {
-        "receita_total_matriz_filial": total_revenue,
+        "receita_matriz": receita_matriz,
+        "receita_total_matriz_filial": receita_unificada,
+        "pis_matriz": pis_matriz,
+        "cofins_matriz": cofins_matriz,
+        "ir_base_matriz": ir_base_matriz,
+        "adicional_ir_matriz": adicional_ir_matriz,
+        "ir_matriz": ir_matriz,
+        "csll_matriz": csll_matriz,
+        "federal_matriz": federal_matriz,
         "pis_bruto": pis_bruto,
-        "credito_pis": credito_pis,
+        "credito_pis": 0.0,
         "pis_liquido": pis_liquido,
         "cofins_bruto": cofins_bruto,
-        "credito_cofins": credito_cofins,
+        "credito_cofins": 0.0,
         "cofins_liquido": cofins_liquido,
+        "ir_base": ir_base,
+        "adicional_ir": adicional_ir,
         "ir": ir,
         "csll": csll,
         "ipi": ipi,
         "total": total,
     }
-
 
 def calc_multi(multi: MultiSimplesInputs) -> dict[str, Any]:
     effective_rate = multi.das_atual / multi.receita_atual if multi.receita_atual else 0
@@ -412,7 +464,7 @@ class DashboardApp:
         self.page.window_min_width = 1280
         self.page.window_min_height = 860
 
-        self.bundle = load_bundle(Path.cwd())
+        self.bundle = load_bundle(Path(__file__).parent)
         self.matrix = MatrixInputs()
         self.filial = FilialInputs()
         self.multi = self.bundle.multi
@@ -432,21 +484,21 @@ class DashboardApp:
     def apply_defaults_from_files(self):
         rev = self.bundle.modelo.get("revenda_credito", pd.DataFrame())
         if not rev.empty:
-            total_rev = rev["VALOR_ENTRADA"].sum()
-            total_icms = rev["ICMS_OBSERVADO"].sum()
+            total_rev = series_sum_numeric(rev, "VALOR_ENTRADA")
+            total_icms = series_sum_numeric(rev, "ICMS_OBSERVADO")
             if total_rev:
                 self.matrix.credito_icms_pct = total_icms / total_rev
         icms_df = self.bundle.modelo.get("icms_matriz", pd.DataFrame())
         if not icms_df.empty and "Linha" in icms_df.columns:
-            mapping = {str(r["Linha"]).strip(): r.get("Valor", None) for _, r in icms_df.iterrows()}
-            self.matrix.faturamento = float(mapping.get("Faturamento de saída", self.matrix.faturamento) or self.matrix.faturamento)
-            self.matrix.credito_icms_estoque_total = float(mapping.get("Crédito total ICMS estoque", self.matrix.credito_icms_estoque_total) or self.matrix.credito_icms_estoque_total)
+            mapping = {str(r["Linha"]).strip(): to_number(r.get("Valor", None), 0.0) for _, r in icms_df.iterrows()}
+            self.matrix.faturamento = to_number(mapping.get("Faturamento de saída", self.matrix.faturamento), self.matrix.faturamento)
+            self.matrix.credito_icms_estoque_total = to_number(mapping.get("Crédito total ICMS estoque", self.matrix.credito_icms_estoque_total), self.matrix.credito_icms_estoque_total)
         filial_df = self.bundle.modelo.get("filial", pd.DataFrame())
         if not filial_df.empty and "Linha" in filial_df.columns:
             try:
                 row = filial_df[filial_df["Linha"].astype(str).str.contains("Faturamento de saída", na=False)].iloc[0]
                 if "300 mil" in row:
-                    self.filial.faturamento = float(row["300 mil"] or self.filial.faturamento)
+                    self.filial.faturamento = to_number(row["300 mil"], self.filial.faturamento)
             except Exception:
                 pass
         prem = self.bundle.modelo.get("premissas", pd.DataFrame())
@@ -455,10 +507,7 @@ class DashboardApp:
                 label = str(row.iloc[0] or "")
                 val = row.iloc[1]
                 if label.startswith("Filial | despesa média mensal"):
-                    try:
-                        self.filial.despesa_informativa = float(val)
-                    except Exception:
-                        pass
+                    self.filial.despesa_informativa = to_number(val, self.filial.despesa_informativa)
 
     def render(self):
         self.page.controls.clear()
@@ -758,8 +807,13 @@ class DashboardApp:
         taxes = [
             ("ICMS Matriz", group["matrix"]["icms_final"], PRIMARY),
             ("ICMS Filial", group["filial"]["icms"], "#0EA5E9"),
-            ("Federal Matriz", group["federal_pela_matriz"], "#14B8A6"),
-            ("DAS Multi", group["multi"]["das_total"], "#8B5CF6"),
+            ("PIS consolidado", group["federal"]["pis_liquido"], "#10B981"),
+            ("Cofins consolidado", group["federal"]["cofins_liquido"], "#06B6D4"),
+            ("IRPJ base", group["federal"]["ir_base"], "#F59E0B"),
+            ("Adicional IRPJ", group["federal"]["adicional_ir"], "#F97316"),
+            ("CSLL consolidada", group["federal"]["csll"], "#EF4444"),
+            ("IPI filial", group["federal"]["ipi"], "#8B5CF6"),
+            ("DAS Multi", group["multi"]["das_total"], "#7C3AED"),
         ]
         content = ft.Column(
             spacing=18,
@@ -801,6 +855,16 @@ class DashboardApp:
                                             color="#334155",
                                         ),
                                         ft.Text(
+                                            f"No consolidado, PIS {br_money(group['federal']['pis_liquido'])}, Cofins {br_money(group['federal']['cofins_liquido'])}, IRPJ {br_money(group['federal']['ir'])}, CSLL {br_money(group['federal']['csll'])} e IPI {br_money(group['federal']['ipi'])} permanecem centralizados na matriz.",
+                                            size=13,
+                                            color="#334155",
+                                        ),
+                                        ft.Text(
+                                            f"Adicional de IRPJ no cenário atual: {br_money(group['federal']['adicional_ir'])}.",
+                                            size=13,
+                                            color="#334155",
+                                        ),
+                                        ft.Text(
                                             "A filial deve ser controlada nos primeiros 3 a 4 meses, porque o benefício pode não estar operacional desde o primeiro faturamento. O uso tácito do benefício só é recomendável com certidões em dia.",
                                             size=13,
                                             color=PRIMARY_DARK,
@@ -829,6 +893,10 @@ class DashboardApp:
             ("Crédito histórico", matrix["icms_credito_historico"], "#14B8A6"),
             ("Economia ferragens", matrix["economia_ferragens"], "#8B5CF6"),
             ("ICMS final", matrix["icms_final"], "#0EA5E9"),
+            ("PIS matriz", federal["pis_matriz"], "#10B981"),
+            ("Cofins matriz", federal["cofins_matriz"], "#06B6D4"),
+            ("IRPJ matriz", federal["ir_matriz"], "#F59E0B"),
+            ("CSLL matriz", federal["csll_matriz"], "#EF4444"),
         ]
         return ft.Column(
             spacing=18,
@@ -843,14 +911,54 @@ class DashboardApp:
                                 controls=[
                                     ft.ResponsiveRow(
                                         controls=[
-                                            ft.Container(col={"sm": 12, "md": 6, "xl": 3}, content=self.card("ICMS líquido da matriz", br_money(matrix["icms_final"]), "Após crédito histórico e crédito mensal", CARD)),
-                                            ft.Container(col={"sm": 12, "md": 6, "xl": 3}, content=self.card("Crédito mensal do estoque", br_money(matrix["credito_mensal"]), "Diluído em 6 meses para leitura", SOFT_BLUE)),
-                                            ft.Container(col={"sm": 12, "md": 6, "xl": 3}, content=self.card("Economia em ferragens", br_money(matrix["economia_ferragens"]), "22% menos 14% na parcela elegível", SOFT_PURPLE)),
-                                            ft.Container(col={"sm": 12, "md": 6, "xl": 3}, content=self.card("Federal consolidado", br_money(federal["total"]), "Pago pela matriz na consolidação", SOFT_ORANGE)),
+                                            ft.Container(
+                                                col={"sm": 12, "md": 6, "xl": 3},
+                                                content=self.card(
+                                                    "ICMS líquido da matriz",
+                                                    br_money(matrix["icms_final"]),
+                                                    "Após crédito histórico e crédito mensal",
+                                                    CARD,
+                                                ),
+                                            ),
+                                            ft.Container(
+                                                col={"sm": 12, "md": 6, "xl": 3},
+                                                content=self.card(
+                                                    "Crédito mensal do estoque",
+                                                    br_money(matrix["credito_mensal"]),
+                                                    "Diluído em 6 meses para leitura",
+                                                    SOFT_BLUE,
+                                                ),
+                                            ),
+                                            ft.Container(
+                                                col={"sm": 12, "md": 6, "xl": 3},
+                                                content=self.card(
+                                                    "Economia em ferragens",
+                                                    br_money(matrix["economia_ferragens"]),
+                                                    "22% menos 14% na parcela elegível",
+                                                    SOFT_PURPLE,
+                                                ),
+                                            ),
+                                            ft.Container(
+                                                col={"sm": 12, "md": 6, "xl": 3},
+                                                content=self.card(
+                                                    "Federal da matriz",
+                                                    br_money(federal["federal_matriz"]),
+                                                    "PIS, Cofins, IRPJ e CSLL sobre a receita da matriz",
+                                                    SOFT_ORANGE,
+                                                ),
+                                            ),
                                         ]
                                     ),
-                                    self.section_card("Composição dos tributos da matriz", self.build_value_bars(bars), "Visual limpo com números visíveis"),
-                                    self.section_card("Revenda dinâmica e demonstrativos", self.build_revenda_browser(), "Filtro por empresa, busca por produto, fornecedor, NCM e diferentes demonstrativos"),
+                                    self.section_card(
+                                        "Composição dos tributos da matriz",
+                                        self.build_value_bars(bars),
+                                        "ICMS da revenda com federais calculados sobre a receita da matriz",
+                                    ),
+                                    self.section_card(
+                                        "Revenda dinâmica e demonstrativos",
+                                        self.build_revenda_browser(),
+                                        "Filtro por empresa, busca por produto, fornecedor, NCM e diferentes demonstrativos",
+                                    ),
                                 ],
                             ),
                         ),
@@ -1030,21 +1138,23 @@ class DashboardApp:
         )
 
     def format_cell(self, value: Any) -> str:
+        if pd.isna(value):
+            return ""
         if isinstance(value, float):
             if abs(value) <= 1 and not value.is_integer():
                 return br_pct(value, 2)
             if abs(value) >= 1000 or value != int(value):
                 return br_money(value)
             return str(int(value))
-        if pd.isna(value):
-            return ""
         return str(value)
 
     def build_value_bars(self, items: list[tuple[str, float, str]]) -> ft.Control:
-        max_val = max([max(float(v), 0) for _, v, _ in items] + [1])
+        values = [max(to_number(v, 0.0), 0.0) for _, v, _ in items]
+        max_val = max(values + [1.0])
         rows = []
         for label, value, color in items:
-            width = max(24, int((max(float(value), 0) / max_val) * 320))
+            numeric_value = max(to_number(value, 0.0), 0.0)
+            width = max(24, int((numeric_value / max_val) * 320))
             rows.append(
                 ft.Row(
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
@@ -1261,7 +1371,7 @@ class DashboardApp:
 
     def small_toggle(self, text: str, selected: bool, handler) -> ft.Control:
         return ft.TextButton(
-            text=text,
+            text,
             style=ft.ButtonStyle(
                 bgcolor=SOFT_BLUE if selected else "#F8FAFC",
                 color=PRIMARY_DARK if selected else "#334155",
@@ -1275,7 +1385,9 @@ class DashboardApp:
 def main(page: ft.Page):
     DashboardApp(page)
 
+
 app = ft.run(main, export_asgi_app=True)
+
 
 if __name__ == "__main__":
     ft.run(main)
