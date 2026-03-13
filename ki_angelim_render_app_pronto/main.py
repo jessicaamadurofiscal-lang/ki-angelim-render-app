@@ -1275,6 +1275,7 @@ class DashboardApp:
 def main(page: ft.Page):
     DashboardApp(page)
 
+app = ft.run(main, export_asgi_app=True)
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    ft.run(main)
